@@ -1,0 +1,14 @@
+[[servers]]
+name = "ext1"
+ssh_target = "user@ext1"
+temp_roots = ["/data/tmp", "/tmp"]
+
+[[servers]]
+name = "ext2"
+ssh_target = "user@ext2"
+temp_roots = ["/data/tmp", "/tmp"]
+
+[[servers]]
+name = "ext3"
+ssh_target = "user@ext3"
+temp_roots = ["/data/tmp", "/tmp"]
