@@ -28,7 +28,7 @@ controller
   ├─ probes each server with df and a small HF speed test
   ├─ assigns bytes according to measured speed
   ├─ runs remote downloads over SSH
-  ├─ pulls completed files with rsync
+  ├─ pulls completed files with rsync or scp
   └─ writes files to $SAVE_PATH/<org>/<model>
 ```
 
@@ -43,8 +43,15 @@ Each worker server needs:
 - SSH access from the controller
 - `python3`
 - `hf` or `huggingface-cli`
-- `rsync`
 - enough free space in one configured temporary root
+
+The controller needs `ssh` plus one transfer tool. On Linux/macOS, `auto`
+prefers `rsync` and falls back to `scp`. On Windows, `auto` prefers the built-in
+OpenSSH `scp` because native rsync path handling is inconsistent unless you
+install and configure a Windows rsync distribution explicitly.
+
+Workers only need `rsync` when the controller transfer backend is `rsync`.
+Workers do not need `rsync` when the controller uses `scp`.
 
 For faster per-server download, install `hf_transfer` on worker servers. `msdl`
 enables `HF_HUB_ENABLE_HF_TRANSFER=1` only when the package is present.
@@ -81,6 +88,16 @@ Set the final save root on the controller:
 export MULTISERVER_DOWNLOAD_SAVE_PATH=/models
 uv run msdl download meta-llama/Llama-3.1-70B --servers servers.toml
 ```
+
+Windows PowerShell controller example:
+
+```powershell
+$env:MULTISERVER_DOWNLOAD_SAVE_PATH = "D:\models"
+uv run msdl download meta-llama/Llama-3.1-70B --servers .\servers.toml
+```
+
+The worker `temp_roots` still use Linux paths, for example `/data/tmp` or
+`/tmp`, because workers are controlled over SSH.
 
 The final layout is:
 
@@ -121,23 +138,25 @@ uv run msdl download org/private-model --servers servers.toml --forward-hf-token
 The token is forwarded only to the remote command environment and is not printed
 in logs.
 
-## rsync Behavior
+## Transfer Behavior
 
-`msdl` does not rsync a whole Hugging Face cache or a large directory tree. It
-pulls exactly one completed file at a time:
+`msdl` does not transfer a whole Hugging Face cache or a large directory tree.
+It pulls exactly one completed file at a time:
 
 ```text
 remote temp file -> local .incoming file -> size check -> final rename
 ```
 
-The default rsync flags are optimized for large model files:
+With `rsync`, the default flags are optimized for large model files:
 
 ```text
 --partial --append-verify --whole-file --no-compress
 ```
 
 This avoids the expensive initial scan pattern that makes rsync slow on huge
-cache directories.
+cache directories. With `scp`, the transfer is simpler and works well on a
+Windows controller, but interrupted file transfers restart instead of using
+rsync's append verification.
 
 ## Development
 

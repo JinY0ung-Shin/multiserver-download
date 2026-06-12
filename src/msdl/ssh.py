@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import posixpath
 import shlex
 import shutil
@@ -9,6 +10,7 @@ import subprocess
 import textwrap
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import quote
 
 from .models import RepoFile, ServerConfig, ServerProbe
 
@@ -70,7 +72,10 @@ def probe_speed(
     ssh_options: list[str],
     forwarded_token: str | None,
 ) -> float:
-    url = f"https://huggingface.co/{repo_id}/resolve/{revision}/{sample_path}"
+    url = (
+        f"https://huggingface.co/{quote(repo_id, safe='/')}"
+        f"/resolve/{quote(revision, safe='')}/{quote(sample_path, safe='/')}"
+    )
     script = r"""
 import json
 import os
@@ -216,6 +221,12 @@ def pull_file_scp(
 def resolve_transfer_backend(requested: str) -> str:
     if requested != "auto":
         return requested
+    if os.name == "nt":
+        if shutil.which("scp"):
+            return "scp"
+        if shutil.which("rsync"):
+            return "rsync"
+        raise RuntimeError("neither scp nor rsync is available on the controller")
     if shutil.which("rsync"):
         return "rsync"
     if shutil.which("scp"):

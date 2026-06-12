@@ -5,15 +5,24 @@ import concurrent.futures
 import json
 import logging
 import os
+import re
+import shlex
 import shutil
 import sys
 import time
 import uuid
 from dataclasses import asdict
 from pathlib import Path
+from pathlib import PurePosixPath
 
 from .config import load_servers
-from .hf import SAVE_PATH_ENV, get_hf_token, list_repo_files, target_dir_for
+from .hf import (
+    SAVE_PATH_ENV,
+    get_hf_token,
+    list_repo_files,
+    local_path_for_repo_file,
+    target_dir_for,
+)
 from .models import Assignment, RepoFile, ServerConfig, ServerProbe
 from .planner import assign_files, format_bytes
 from .progress import (
@@ -159,7 +168,7 @@ def download(args: argparse.Namespace) -> None:
         repo_id=args.repo_id,
         revision=args.revision,
         target_dir=target_dir,
-        incoming_dir=incoming_dir / job_id,
+        incoming_dir=incoming_dir,
         ssh_options=ssh_options,
         forwarded_token=forwarded_token,
         keep_remote=args.keep_remote,
@@ -204,8 +213,33 @@ def resolve_save_root(save_path: Path | None) -> Path:
 def flatten_ssh_options(options: list[str]) -> list[str]:
     flattened: list[str] = []
     for option in options:
-        flattened.extend(option.split())
+        flattened.extend(split_ssh_option(option))
     return flattened
+
+
+def split_ssh_option(option: str) -> list[str]:
+    option = option.strip()
+    if not option:
+        return []
+    if os.name == "nt":
+        return split_windows_ssh_option(option)
+    return shlex.split(option)
+
+
+def split_windows_ssh_option(option: str) -> list[str]:
+    match = re.match(r"^(-[A-Za-z0-9]+)\s+(.+)$", option)
+    if match:
+        return [match.group(1), strip_outer_quotes(match.group(2))]
+    return [strip_outer_quotes(part) for part in option.split() if part]
+
+
+def strip_outer_quotes(value: str) -> str:
+    if "=" in value:
+        key, nested_value = value.split("=", 1)
+        return f"{key}={strip_outer_quotes(nested_value)}"
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
 
 
 def ensure_local_capacity(save_root: Path, total_bytes: int) -> None:
@@ -322,8 +356,10 @@ def run_assignments(
     def run_one(assignment: Assignment) -> None:
         probe = assignment.probe
         for file in assignment.files:
-            final_path = target_dir / file.path
-            part_path = incoming_dir / probe.config.name / f"{file.path}.part"
+            final_path = local_path_for_repo_file(target_dir, file.path)
+            part_path = local_path_for_repo_file(incoming_dir, file.path).with_name(
+                f"{PurePosixPath(file.path).name}.part"
+            )
             try:
                 if final_path.exists() and final_path.stat().st_size == file.size:
                     summary = tracker.update_file(file.path, "skipped")

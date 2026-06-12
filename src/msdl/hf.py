@@ -3,11 +3,21 @@ from __future__ import annotations
 import fnmatch
 import os
 from pathlib import Path
+from pathlib import PurePosixPath
 
 from .models import RepoFile
 
 
 SAVE_PATH_ENV = "MULTISERVER_DOWNLOAD_SAVE_PATH"
+_WINDOWS_RESERVED_NAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
+_WINDOWS_INVALID_CHARS = set('<>:"|?*')
 
 
 def get_hf_token() -> str | None:
@@ -21,10 +31,40 @@ def target_dir_for(repo_id: str, save_root: Path) -> Path:
     return save_root / parts[0] / parts[1]
 
 
+def repo_file_parts(path: str) -> tuple[str, ...]:
+    validate_repo_file_path(path)
+    return tuple(PurePosixPath(path).parts)
+
+
+def local_path_for_repo_file(base_dir: Path, path: str) -> Path:
+    parts = repo_file_parts(path)
+    if os.name == "nt":
+        validate_windows_repo_file_path(path)
+    return base_dir.joinpath(*parts)
+
+
 def validate_repo_file_path(path: str) -> None:
-    pure = Path(path)
-    if pure.is_absolute() or ".." in pure.parts:
+    if "\\" in path:
         raise ValueError(f"unsafe repo file path: {path}")
+    pure = PurePosixPath(path)
+    parts = path.split("/")
+    if (
+        not path
+        or pure.is_absolute()
+        or any(part in {"", ".", ".."} for part in parts)
+    ):
+        raise ValueError(f"unsafe repo file path: {path}")
+
+
+def validate_windows_repo_file_path(path: str) -> None:
+    for part in repo_file_parts(path):
+        upper_stem = part.split(".", 1)[0].upper()
+        if (
+            upper_stem in _WINDOWS_RESERVED_NAMES
+            or part[-1:] in {" ", "."}
+            or any(char in _WINDOWS_INVALID_CHARS or ord(char) < 32 for char in part)
+        ):
+            raise ValueError(f"repo file path is not valid on Windows: {path}")
 
 
 def list_repo_files(
