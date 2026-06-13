@@ -25,10 +25,23 @@ def get_hf_token() -> str | None:
 
 
 def target_dir_for(repo_id: str, save_root: Path) -> Path:
-    parts = repo_id.split("/", 1)
-    if len(parts) != 2 or not parts[0] or not parts[1]:
+    namespace, name = validate_repo_id(repo_id)
+    return save_root / namespace / name
+
+
+def validate_repo_id(repo_id: str) -> tuple[str, str]:
+    if "\\" in repo_id:
         raise ValueError("repo_id must use the Hugging Face <org>/<model> form")
-    return save_root / parts[0] / parts[1]
+    parts = repo_id.split("/")
+    if (
+        len(parts) != 2
+        or not parts[0]
+        or not parts[1]
+        or any(part in {".", ".."} for part in parts)
+        or any(PurePosixPath(part).is_absolute() for part in parts)
+    ):
+        raise ValueError("repo_id must use the Hugging Face <org>/<model> form")
+    return parts[0], parts[1]
 
 
 def repo_file_parts(path: str) -> tuple[str, ...]:
@@ -94,6 +107,8 @@ def list_repo_files(
         if size is None:
             lfs = getattr(sibling, "lfs", None) or {}
             size = lfs.get("size") if isinstance(lfs, dict) else None
+        if size is None:
+            raise RuntimeError(f"missing size metadata for repo file: {path}")
         files.append(RepoFile(path=path, size=int(size or 0), etag=getattr(sibling, "blob_id", None)))
 
     if not files:

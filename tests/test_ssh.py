@@ -73,6 +73,11 @@ def test_remote_destination_path_appends_repo_and_file():
     )
 
 
+def test_remote_destination_path_rejects_parent_repo_segments():
+    with pytest.raises(ValueError, match="repo_id"):
+        ssh.remote_destination_path("/models", "org/..")
+
+
 def test_auto_transfer_backend_for_local_worker_uses_controller_tools(monkeypatch):
     server = ServerConfig(
         name="main",

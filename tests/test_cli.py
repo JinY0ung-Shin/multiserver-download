@@ -7,6 +7,9 @@ from msdl.cli import (
     Destination,
     build_parser,
     download,
+    ensure_controller_work_capacity,
+    ensure_destination_capacity,
+    finalize_local_file,
     parse_remote_destination,
     preflight_checks,
     split_windows_ssh_option,
@@ -58,6 +61,129 @@ def test_download_parses_remote_destination_and_work_path():
 def test_parse_remote_destination_requires_absolute_path():
     with pytest.raises(ValueError, match="--destination"):
         parse_remote_destination("final:models")
+
+
+def test_ensure_destination_capacity_counts_only_missing_local_files(tmp_path, monkeypatch):
+    target = tmp_path / "target"
+    existing = target / "done.bin"
+    existing.parent.mkdir(parents=True)
+    existing.write_bytes(b"abc")
+    destination = Destination(label=str(target), local_target_dir=target)
+    calls = []
+
+    monkeypatch.setattr(
+        cli,
+        "ensure_local_capacity",
+        lambda path, required: calls.append((path, required)),
+    )
+
+    missing = ensure_destination_capacity(
+        destination,
+        [RepoFile("done.bin", 3), RepoFile("missing.bin", 5)],
+        [],
+    )
+
+    assert missing == {"missing.bin"}
+    assert calls == [(target, 5)]
+
+
+def test_ensure_destination_capacity_counts_only_missing_remote_files(tmp_path, monkeypatch):
+    destination = Destination(
+        label="final:/models/org/model",
+        local_target_dir=tmp_path / "work",
+        remote_ssh_target="final",
+        remote_target_dir="/models/org/model",
+    )
+
+    def fake_remote_file_size(ssh_target, remote_path, options):
+        if remote_path.endswith("/done.bin"):
+            return 3
+        return None
+
+    monkeypatch.setattr(cli, "remote_file_size", fake_remote_file_size)
+    monkeypatch.setattr(cli, "remote_free_bytes", lambda ssh_target, remote_path, options: 5)
+
+    missing = ensure_destination_capacity(
+        destination,
+        [RepoFile("done.bin", 3), RepoFile("missing.bin", 5)],
+        [],
+    )
+
+    assert missing == {"missing.bin"}
+
+
+def test_ensure_controller_work_capacity_sums_concurrent_remote_pulls(tmp_path, monkeypatch):
+    destination = Destination(
+        label="final:/models/org/model",
+        local_target_dir=tmp_path / "work",
+        remote_ssh_target="final",
+        remote_target_dir="/models/org/model",
+    )
+    remote1 = Assignment(
+        probe=ServerProbe(
+            config=ServerConfig("remote1", "user@remote1", ("/tmp",)),
+            temp_root="/tmp",
+            temp_dir="/tmp/job",
+            free_bytes=1000,
+            speed_bps=1,
+        ),
+        files=(RepoFile("a.bin", 100), RepoFile("b.bin", 10)),
+    )
+    remote2 = Assignment(
+        probe=ServerProbe(
+            config=ServerConfig("remote2", "user@remote2", ("/tmp",)),
+            temp_root="/tmp",
+            temp_dir="/tmp/job",
+            free_bytes=1000,
+            speed_bps=1,
+        ),
+        files=(RepoFile("c.bin", 70),),
+    )
+    local = Assignment(
+        probe=ServerProbe(
+            config=ServerConfig("main", None, ("/tmp",), local=True),
+            temp_root="/tmp",
+            temp_dir="/tmp/job",
+            free_bytes=1000,
+            speed_bps=1,
+        ),
+        files=(RepoFile("local.bin", 1000),),
+    )
+    calls = []
+
+    monkeypatch.setattr(
+        cli,
+        "ensure_local_capacity",
+        lambda path, required: calls.append((path, required)),
+    )
+
+    ensure_controller_work_capacity(
+        destination,
+        [remote1, remote2, local],
+        {"a.bin", "b.bin", "c.bin", "local.bin"},
+    )
+
+    assert calls == [(destination.local_target_dir, 170)]
+
+
+def test_finalize_local_file_falls_back_when_rename_crosses_devices(tmp_path, monkeypatch):
+    source = tmp_path / "temp" / "model.bin"
+    final = tmp_path / "final" / "model.bin"
+    source.parent.mkdir()
+    source.write_bytes(b"model")
+    original_replace = Path.replace
+
+    def fake_replace(self, target):
+        if self == source:
+            raise OSError(cli.errno.EXDEV, "cross-device link")
+        return original_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", fake_replace)
+
+    finalize_local_file(source, final, keep_source=False)
+
+    assert final.read_bytes() == b"model"
+    assert not source.exists()
 
 
 def test_windows_ssh_option_split_preserves_backslash_path():

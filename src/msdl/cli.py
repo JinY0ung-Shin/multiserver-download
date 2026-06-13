@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import errno
 import json
 import logging
 import os
@@ -10,6 +11,7 @@ import re
 import shlex
 import shutil
 import sys
+import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -171,7 +173,7 @@ def download(args: argparse.Namespace) -> None:
     total_bytes = sum(file.size for file in files)
     LOG.info("manifest: %s files, %s", len(files), format_bytes(total_bytes))
 
-    ensure_destination_capacity(destination, total_bytes, files, ssh_options)
+    missing_paths = ensure_destination_capacity(destination, files, ssh_options)
     plan_dir.mkdir(parents=True, exist_ok=True)
     incoming_dir.mkdir(parents=True, exist_ok=True)
 
@@ -190,6 +192,7 @@ def download(args: argparse.Namespace) -> None:
     reserve_bytes = int(args.reserve_gib * 1024**3)
     assignments = assign_files(files, probes, reserve_bytes=reserve_bytes)
     log_plan(assignments)
+    ensure_controller_work_capacity(destination, assignments, missing_paths)
     transfer_backend = args.transfer_backend
     validate_transfer_backends(assignments, transfer_backend, destination)
     preflight_checks(
@@ -325,26 +328,75 @@ def parse_remote_destination(value: str) -> tuple[str, str]:
 
 def ensure_destination_capacity(
     destination: Destination,
-    total_bytes: int,
     files: list[RepoFile],
     ssh_options: list[str],
-) -> None:
-    if not destination.is_remote:
-        ensure_local_capacity(destination.local_target_dir, total_bytes)
-        return
+) -> set[str]:
+    missing_files = destination_missing_files(destination, files, ssh_options)
+    missing_paths = {file.path for file in missing_files}
+    missing_bytes = sum(file.size for file in missing_files)
 
-    largest_file = max((file.size for file in files), default=0)
-    ensure_local_capacity(destination.local_target_dir, largest_file)
+    if not destination.is_remote:
+        ensure_local_capacity(destination.local_target_dir, missing_bytes)
+        return missing_paths
+
+    destination.local_target_dir.mkdir(parents=True, exist_ok=True)
     remote_free = remote_free_bytes(
         destination.remote_ssh_target or "",
         destination.remote_target_dir or "",
         ssh_options,
     )
-    if remote_free < total_bytes:
+    if remote_free < missing_bytes:
         raise ValueError(
             f"not enough remote free space under {destination.label}: "
-            f"need {format_bytes(total_bytes)}, have {format_bytes(remote_free)}"
+            f"need {format_bytes(missing_bytes)}, have {format_bytes(remote_free)}"
         )
+    return missing_paths
+
+
+def destination_missing_files(
+    destination: Destination,
+    files: list[RepoFile],
+    ssh_options: list[str],
+) -> list[RepoFile]:
+    missing: list[RepoFile] = []
+    for file in files:
+        if destination.is_remote:
+            remote_path = posixpath.join(destination.remote_target_dir or "", file.path)
+            existing_size = remote_file_size(
+                destination.remote_ssh_target or "",
+                remote_path,
+                ssh_options,
+            )
+            if existing_size == file.size:
+                continue
+        else:
+            local_path = local_path_for_repo_file(destination.local_target_dir, file.path)
+            if local_path.exists() and local_path.stat().st_size == file.size:
+                continue
+        missing.append(file)
+    return missing
+
+
+def ensure_controller_work_capacity(
+    destination: Destination,
+    assignments: list[Assignment],
+    missing_paths: set[str],
+) -> None:
+    if not destination.is_remote:
+        return
+
+    required_bytes = 0
+    for assignment in assignments:
+        if assignment.probe.config.local:
+            continue
+        missing_sizes = [
+            file.size
+            for file in assignment.files
+            if file.path in missing_paths
+        ]
+        if missing_sizes:
+            required_bytes += max(missing_sizes)
+    ensure_local_capacity(destination.local_target_dir, required_bytes)
 
 
 def flatten_ssh_options(options: list[str]) -> list[str]:
@@ -568,9 +620,13 @@ def run_assignments(
     tracker: ProgressTracker,
     transfer_backend: str,
 ) -> None:
+    stop_event = threading.Event()
+
     def run_one(assignment: Assignment) -> None:
         probe = assignment.probe
         for file in assignment.files:
+            if stop_event.is_set():
+                return
             final_path = local_path_for_repo_file(target_dir, file.path)
             remote_final_path = (
                 posixpath.join(destination.remote_target_dir or "", file.path)
@@ -654,17 +710,18 @@ def run_assignments(
                     if transfer_source == part_path:
                         part_path.unlink(missing_ok=True)
                 else:
-                    final_path.parent.mkdir(parents=True, exist_ok=True)
-                    if probe.config.local and keep_remote:
-                        shutil.copy2(transfer_source, final_path)
-                    else:
-                        transfer_source.replace(final_path)
+                    finalize_local_file(
+                        transfer_source,
+                        final_path,
+                        keep_source=probe.config.local and keep_remote,
+                    )
                 if not keep_remote:
                     remove_remote_file(probe.config, remote_path, ssh_options)
                 summary = tracker.update_file(file.path, "done")
                 LOG.info("%s done %s; %s", probe.config.name, file.path, summary)
             except Exception as exc:
                 tracker.update_file(file.path, "failed", error=str(exc))
+                stop_event.set()
                 raise
 
     tracker.set_state("running")
@@ -672,11 +729,36 @@ def run_assignments(
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(assignments)) as pool:
             futures = [pool.submit(run_one, assignment) for assignment in assignments]
             for future in concurrent.futures.as_completed(futures):
-                future.result()
+                try:
+                    future.result()
+                except Exception:
+                    stop_event.set()
+                    for pending in futures:
+                        pending.cancel()
+                    raise
     except Exception:
         tracker.set_state("failed")
         raise
     tracker.set_state("complete")
+
+
+def finalize_local_file(source: Path, final_path: Path, keep_source: bool) -> None:
+    final_path.parent.mkdir(parents=True, exist_ok=True)
+    if keep_source:
+        part_path = final_path.with_name(f"{final_path.name}.part")
+        shutil.copy2(source, part_path)
+        part_path.replace(final_path)
+        return
+
+    try:
+        source.replace(final_path)
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+        part_path = final_path.with_name(f"{final_path.name}.part")
+        shutil.copy2(source, part_path)
+        part_path.replace(final_path)
+        source.unlink(missing_ok=True)
 
 
 def pull_file(

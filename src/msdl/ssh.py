@@ -15,6 +15,7 @@ from pathlib import Path
 from pathlib import PurePosixPath
 from urllib.parse import quote
 
+from .hf import validate_repo_id
 from .models import RepoFile, ServerConfig, ServerProbe
 
 
@@ -641,10 +642,8 @@ def remote_path_for_repo_file(config: ServerConfig, temp_dir: str, file_path: st
 
 
 def remote_destination_path(root: str, repo_id: str, file_path: str | None = None) -> str:
-    parts = repo_id.split("/", 1)
-    if len(parts) != 2 or not parts[0] or not parts[1]:
-        raise ValueError("repo_id must use the Hugging Face <org>/<model> form")
-    path = posixpath.join(root.rstrip("/") or "/", parts[0], parts[1])
+    namespace, name = validate_repo_id(repo_id)
+    path = posixpath.join(root.rstrip("/") or "/", namespace, name)
     if file_path:
         path = posixpath.join(path, file_path)
     return path
