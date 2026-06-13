@@ -39,10 +39,10 @@ controller
 uv sync
 ```
 
-If the final Linux server cannot open outbound connections, run `msdl` on a
-main worker/controller that can reach Hugging Face, the workers, and the final
-Linux server. The final Linux server is not listed in `servers.toml`; pass it as
-`--destination user@final:/models`.
+If the final Linux server cannot open outbound connections, run `msdl` on the
+Windows main worker/controller that can reach Hugging Face, the workers, and the
+final Linux server. The final Linux server is not listed in `servers.toml`; pass
+it as `--destination user@final:/models`.
 
 The main controller can participate as a worker without SSH:
 
@@ -50,8 +50,8 @@ The main controller can participate as a worker without SSH:
 [[servers]]
 name = "main"
 local = true
-platform = "linux"
-temp_roots = ["/data/msdl-tmp", "/tmp"]
+platform = "windows"
+temp_roots = ["D:/msdl-main-tmp"]
 ```
 
 Each Linux worker needs:
@@ -69,11 +69,8 @@ Each Windows worker needs:
 - `hf` or `huggingface-cli`
 - enough free space in one configured temporary root, such as `D:/msdl-tmp`
 
-The controller needs `ssh` plus one transfer tool. In `auto` mode, Linux workers
-use `rsync` when available and fall back to `scp`; Windows workers use `scp`.
-
-Workers only need `rsync` when the controller transfer backend is `rsync`.
-Workers do not need `rsync` when the controller uses `scp`.
+The Windows main controller needs `ssh` and `scp`. In `auto` mode on Windows,
+worker pulls and final-destination pushes use `scp`.
 
 For faster per-server download, install `hf_transfer` on worker servers. `msdl`
 enables `HF_HUB_ENABLE_HF_TRANSFER=1` only when the package is present.
@@ -92,8 +89,8 @@ Copy `servers.example.toml` and edit it:
 [[servers]]
 name = "main"
 local = true
-platform = "linux"
-temp_roots = ["/data/msdl-tmp", "/tmp"]
+platform = "windows"
+temp_roots = ["D:/msdl-main-tmp"]
 
 [[servers]]
 name = "win1"
@@ -126,20 +123,20 @@ root with enough free space and creates:
 
 ## Run
 
-Local final destination:
+Local final destination on the Windows main controller:
 
-```bash
-export MULTISERVER_DOWNLOAD_SAVE_PATH=/models
-uv run msdl download meta-llama/Llama-3.1-70B --servers servers.toml
+```powershell
+$env:MULTISERVER_DOWNLOAD_SAVE_PATH = "D:\models"
+uv run msdl download meta-llama/Llama-3.1-70B --servers .\servers.toml
 ```
 
-Inbound-only final Linux destination:
+Inbound-only final Linux destination from Windows PowerShell:
 
-```bash
-export MULTISERVER_DOWNLOAD_WORK_PATH=/data/msdl-work
+```powershell
+$env:MULTISERVER_DOWNLOAD_WORK_PATH = "D:\msdl-work"
 
-uv run msdl download meta-llama/Llama-3.1-70B \
-  --servers servers.toml \
+uv run msdl download meta-llama/Llama-3.1-70B `
+  --servers .\servers.toml `
   --destination user@final:/models
 ```
 
@@ -175,8 +172,13 @@ It also writes the plan to the local target/work directory:
 By default workers use their own Hugging Face credentials. If the controller has
 the token and workers do not, pass:
 
-```bash
-uv run msdl download org/private-model --servers servers.toml --forward-hf-token
+```powershell
+$env:HF_TOKEN = "hf_xxxxxxxxxxxxxxxxx"
+
+uv run msdl download org/private-model `
+  --servers .\servers.toml `
+  --destination user@final:/models `
+  --forward-hf-token
 ```
 
 The token is forwarded only to the remote command environment and is not printed
@@ -191,16 +193,8 @@ It pulls exactly one completed file at a time:
 worker temp file -> controller .incoming file when needed -> size check -> final rename/push
 ```
 
-With `rsync`, the default flags are optimized for large model files:
-
-```text
---partial --append-verify --whole-file --no-compress
-```
-
-This avoids the expensive initial scan pattern that makes rsync slow on huge
-cache directories. Windows workers are pulled with `scp`; interrupted file
-transfers from Windows workers restart instead of using rsync's append
-verification.
+On a Windows main controller, `auto` uses `scp` for worker pulls and final
+destination pushes. Interrupted `scp` transfers restart for that file.
 
 ## Development
 

@@ -1,8 +1,8 @@
 [[servers]]
 name = "main"
 local = true
-platform = "linux"
-temp_roots = ["/data/msdl-tmp", "/tmp"]
+platform = "windows"
+temp_roots = ["D:/msdl-main-tmp"]
 
 [[servers]]
 name = "win1"
