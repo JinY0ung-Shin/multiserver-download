@@ -2,7 +2,8 @@
 
 `msdl` is a single-controller CLI for downloading a Hugging Face model through
 multiple internet-facing SSH workers, then collecting the files into one final
-directory on the controller server. Workers can be Linux or Windows.
+directory. The controller can also push the completed files to an inbound-only
+Linux destination over SSH. Workers can be local, Linux, or Windows.
 
 For a complete Korean operating guide, see
 [docs/usage-guide.md](docs/usage-guide.md).
@@ -13,11 +14,11 @@ The data path does not go through an extra relay service:
                          Hugging Face
                     ┌─────────┬─────────┐
                     │         │         │
-                  win1    linux1   linux2
+                  main     win1    linux1
                 download  download  download
                     │         │         │
-                    └──── controller pull ────▶ final Linux/controller
-                                                $MULTISERVER_DOWNLOAD_SAVE_PATH
+                    └──── main controller relay ────▶ final Linux destination
+                                                      user@final:/models
 ```
 
 The controller is responsible for planning and verification only:
@@ -28,8 +29,8 @@ controller
   ├─ probes each server for free space and HF speed
   ├─ assigns bytes according to measured speed
   ├─ runs remote downloads over SSH
-  ├─ pulls completed files with rsync or scp
-  └─ writes files to $SAVE_PATH/<org>/<model>
+  ├─ pulls completed files with rsync or scp when needed
+  └─ writes locally or pushes to --destination <ssh-target>:/path
 ```
 
 ## Install
@@ -38,9 +39,20 @@ controller
 uv sync
 ```
 
-The controller is the final destination. If the final files should land on a
-Linux server, run `msdl` on that Linux server and include the Windows machine as
-one worker in `servers.toml`.
+If the final Linux server cannot open outbound connections, run `msdl` on a
+main worker/controller that can reach Hugging Face, the workers, and the final
+Linux server. The final Linux server is not listed in `servers.toml`; pass it as
+`--destination user@final:/models`.
+
+The main controller can participate as a worker without SSH:
+
+```toml
+[[servers]]
+name = "main"
+local = true
+platform = "linux"
+temp_roots = ["/data/msdl-tmp", "/tmp"]
+```
 
 Each Linux worker needs:
 
@@ -78,6 +90,12 @@ Copy `servers.example.toml` and edit it:
 
 ```toml
 [[servers]]
+name = "main"
+local = true
+platform = "linux"
+temp_roots = ["/data/msdl-tmp", "/tmp"]
+
+[[servers]]
 name = "win1"
 platform = "windows"
 ssh_target = "user@win1"
@@ -96,9 +114,11 @@ ssh_target = "user@linux2"
 temp_roots = ["/data/tmp", "/tmp"]
 ```
 
-`platform` defaults to `linux` when omitted. Linux `temp_roots` are checked with
-`df -Pk`; Windows `temp_roots` are checked through PowerShell. The controller
-picks a writable root with enough free space and creates:
+`local = true` means the controller itself is a worker, so `ssh_target` is not
+needed. Remote workers still require `ssh_target`. `platform` defaults to
+`linux` when omitted. Linux `temp_roots` are checked with `df -Pk`; Windows
+`temp_roots` are checked through PowerShell. The controller picks a writable
+root with enough free space and creates:
 
 ```text
 <temp_root>/msdl/<job_id>/<org>/<model>/
@@ -106,11 +126,21 @@ picks a writable root with enough free space and creates:
 
 ## Run
 
-Set the final save root on the controller:
+Local final destination:
 
 ```bash
 export MULTISERVER_DOWNLOAD_SAVE_PATH=/models
 uv run msdl download meta-llama/Llama-3.1-70B --servers servers.toml
+```
+
+Inbound-only final Linux destination:
+
+```bash
+export MULTISERVER_DOWNLOAD_WORK_PATH=/data/msdl-work
+
+uv run msdl download meta-llama/Llama-3.1-70B \
+  --servers servers.toml \
+  --destination user@final:/models
 ```
 
 The final layout is:
@@ -134,7 +164,7 @@ At startup, `msdl` logs:
 - free space per server
 - assigned bytes and file counts
 
-It also writes the plan to:
+It also writes the plan to the local target/work directory:
 
 ```text
 <target>/.msdl/<job_id>/plan.json
@@ -158,7 +188,7 @@ in logs.
 It pulls exactly one completed file at a time:
 
 ```text
-remote temp file -> local .incoming file -> size check -> final rename
+worker temp file -> controller .incoming file when needed -> size check -> final rename/push
 ```
 
 With `rsync`, the default flags are optimized for large model files:

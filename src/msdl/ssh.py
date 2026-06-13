@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import base64
+import importlib.util
 import json
 import os
 import posixpath
 import shlex
 import shutil
 import subprocess
+import sys
 import textwrap
 from dataclasses import dataclass
 from pathlib import Path
+from pathlib import PurePosixPath
 from urllib.parse import quote
 
 from .models import RepoFile, ServerConfig, ServerProbe
@@ -38,9 +41,30 @@ def run_ssh(
 
 
 def probe_df(config: ServerConfig, job_id: str, repo_id: str, ssh_options: list[str]) -> tuple[str, str, int]:
+    if config.local:
+        return probe_df_local(config, job_id, repo_id)
     if config.platform == "windows":
         return probe_df_windows(config, job_id, repo_id, ssh_options)
     return probe_df_linux(config, job_id, repo_id, ssh_options)
+
+
+def probe_df_local(config: ServerConfig, job_id: str, repo_id: str) -> tuple[str, str, int]:
+    best: tuple[str, str, int] | None = None
+    safe_repo = repo_id.replace("/", "_")
+    for root in config.temp_roots:
+        root_path = Path(root).expanduser()
+        try:
+            root_path.mkdir(parents=True, exist_ok=True)
+            free_bytes = shutil.disk_usage(root_path).free
+        except OSError:
+            continue
+        temp_dir = root_path / "msdl" / job_id / safe_repo
+        if best is None or free_bytes > best[2]:
+            best = (str(root_path), str(temp_dir), free_bytes)
+    if best is None:
+        raise RuntimeError(f"no usable temp root found for server {config.name}")
+    Path(best[1]).mkdir(parents=True, exist_ok=True)
+    return best
 
 
 def probe_df_linux(config: ServerConfig, job_id: str, repo_id: str, ssh_options: list[str]) -> tuple[str, str, int]:
@@ -50,7 +74,7 @@ def probe_df_linux(config: ServerConfig, job_id: str, repo_id: str, ssh_options:
         quoted_root = shlex.quote(root)
         command = f"mkdir -p {quoted_root} && df -Pk {quoted_root} | tail -n 1"
         try:
-            result = run_ssh(config.ssh_target, command, ssh_options, timeout=30)
+            result = run_ssh(require_ssh_target(config), command, ssh_options, timeout=30)
         except RuntimeError:
             continue
         parts = result.stdout.strip().split()
@@ -65,7 +89,7 @@ def probe_df_linux(config: ServerConfig, job_id: str, repo_id: str, ssh_options:
             best = (root, temp_dir, free_bytes)
     if best is None:
         raise RuntimeError(f"no usable temp root found for server {config.name}")
-    run_ssh(config.ssh_target, f"mkdir -p {shlex.quote(best[1])}", ssh_options, timeout=30)
+    run_ssh(require_ssh_target(config), f"mkdir -p {shlex.quote(best[1])}", ssh_options, timeout=30)
     return best
 
 
@@ -84,7 +108,7 @@ def probe_df_windows(config: ServerConfig, job_id: str, repo_id: str, ssh_option
             """
         )
         try:
-            result = run_windows_powershell(config.ssh_target, script, ssh_options, timeout=30)
+            result = run_windows_powershell(require_ssh_target(config), script, ssh_options, timeout=30)
         except RuntimeError:
             continue
         try:
@@ -97,7 +121,7 @@ def probe_df_windows(config: ServerConfig, job_id: str, repo_id: str, ssh_option
     if best is None:
         raise RuntimeError(f"no usable temp root found for server {config.name}")
     run_windows_powershell(
-        config.ssh_target,
+        require_ssh_target(config),
         f"New-Item -ItemType Directory -Force -LiteralPath {ps_quote(best[1])} | Out-Null",
         ssh_options,
         timeout=30,
@@ -156,8 +180,11 @@ print(json.dumps({"bytes": read, "seconds": elapsed, "bps": read / elapsed}))
     }
     if forwarded_token:
         env["MSDL_HF_TOKEN"] = forwarded_token
-    command = python_script_command(config, encoded, env)
-    result = run_ssh(config.ssh_target, command, ssh_options, timeout=90)
+    if config.local:
+        result = run_local_python_script(encoded, env, timeout=90)
+    else:
+        command = python_script_command(config, encoded, env)
+        result = run_ssh(require_ssh_target(config), command, ssh_options, timeout=90)
     payload = json.loads(result.stdout.strip())
     bps = float(payload["bps"])
     if bps <= 0:
@@ -174,10 +201,56 @@ def download_remote_file(
     ssh_options: list[str],
     forwarded_token: str | None,
 ) -> str:
+    if config.local:
+        return download_local_file(
+            repo_id=repo_id,
+            revision=revision,
+            file=file,
+            temp_dir=temp_dir,
+            forwarded_token=forwarded_token,
+        )
     remote_path = remote_path_for_repo_file(config, temp_dir, file.path)
     command = _download_command(config, repo_id, revision, file.path, temp_dir, forwarded_token)
-    run_ssh(config.ssh_target, command, ssh_options, timeout=None)
+    run_ssh(require_ssh_target(config), command, ssh_options, timeout=None)
     return remote_path
+
+
+def download_local_file(
+    repo_id: str,
+    revision: str,
+    file: RepoFile,
+    temp_dir: str,
+    forwarded_token: str | None,
+) -> str:
+    temp_path = Path(temp_dir).expanduser()
+    temp_path.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    if forwarded_token:
+        env["HF_TOKEN"] = forwarded_token
+    if importlib.util.find_spec("hf_transfer"):
+        env["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+
+    hf = shutil.which("hf") or shutil.which("huggingface-cli")
+    if not hf:
+        raise RuntimeError("missing hf or huggingface-cli on local worker")
+    cmd = [
+        hf,
+        "download",
+        repo_id,
+        file.path,
+        "--revision",
+        revision,
+        "--local-dir",
+        str(temp_path),
+    ]
+    proc = subprocess.run(cmd, text=True, capture_output=True, env=env, check=False)
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or proc.stdout.strip())
+
+    local_path = temp_path.joinpath(*PurePosixPath(file.path).parts)
+    if not local_path.is_file():
+        raise RuntimeError(f"download did not produce expected file: {local_path}")
+    return str(local_path)
 
 
 def _download_command(
@@ -326,6 +399,79 @@ def pull_file_scp(
         raise RuntimeError(f"scp failed from {ssh_target}:{remote_path}: {proc.stderr.strip()}")
 
 
+def push_file_to_remote(
+    local_path: Path,
+    ssh_target: str,
+    remote_path: str,
+    ssh_options: list[str],
+    transfer_backend: str,
+) -> None:
+    remote_part = f"{remote_path}.part"
+    mkdir_remote_parent(ssh_target, remote_path, ssh_options)
+    if transfer_backend == "rsync":
+        push_file_rsync(local_path, ssh_target, remote_part, ssh_options)
+    elif transfer_backend == "scp":
+        push_file_scp(local_path, ssh_target, remote_part, ssh_options)
+    else:
+        raise ValueError(f"unsupported transfer backend: {transfer_backend}")
+    size = remote_file_size(ssh_target, remote_part, ssh_options)
+    if size != local_path.stat().st_size:
+        raise RuntimeError(
+            f"size mismatch for remote {remote_part}: expected {local_path.stat().st_size}, got {size}"
+        )
+    run_ssh(
+        ssh_target,
+        f"mv -f {shlex.quote(remote_part)} {shlex.quote(remote_path)}",
+        ssh_options,
+        timeout=30,
+    )
+
+
+def push_file_rsync(
+    local_path: Path,
+    ssh_target: str,
+    remote_path: str,
+    ssh_options: list[str],
+) -> None:
+    ssh_command = "ssh"
+    if ssh_options:
+        ssh_command = " ".join(["ssh", *(shlex.quote(option) for option in ssh_options)])
+    cmd = [
+        "rsync",
+        "-a",
+        "-s",
+        "--partial",
+        "--append-verify",
+        "--whole-file",
+        "--no-compress",
+        "-e",
+        ssh_command,
+        str(local_path),
+        f"{ssh_target}:{remote_path}",
+    ]
+    proc = subprocess.run(cmd, text=True, capture_output=True, check=False)
+    if proc.returncode != 0:
+        raise RuntimeError(f"rsync failed to {ssh_target}:{remote_path}: {proc.stderr.strip()}")
+
+
+def push_file_scp(
+    local_path: Path,
+    ssh_target: str,
+    remote_path: str,
+    ssh_options: list[str],
+) -> None:
+    cmd = [
+        "scp",
+        *ssh_options,
+        "-p",
+        str(local_path),
+        f"{ssh_target}:{remote_path}",
+    ]
+    proc = subprocess.run(cmd, text=True, capture_output=True, check=False)
+    if proc.returncode != 0:
+        raise RuntimeError(f"scp failed to {ssh_target}:{remote_path}: {proc.stderr.strip()}")
+
+
 def resolve_transfer_backend(requested: str) -> str:
     return resolve_transfer_backend_for_server(requested, None)
 
@@ -355,15 +501,18 @@ def resolve_transfer_backend_for_server(requested: str, config: ServerConfig | N
 
 
 def remove_remote_file(config: ServerConfig, remote_path: str, ssh_options: list[str]) -> None:
+    if config.local:
+        Path(remote_path).unlink(missing_ok=True)
+        return
     if config.platform == "windows":
         run_windows_powershell(
-            config.ssh_target,
+            require_ssh_target(config),
             f"Remove-Item -LiteralPath {ps_quote(remote_path)} -Force -ErrorAction SilentlyContinue",
             ssh_options,
             timeout=30,
         )
         return
-    run_ssh(config.ssh_target, f"rm -f {shlex.quote(remote_path)}", ssh_options, timeout=30)
+    run_ssh(require_ssh_target(config), f"rm -f {shlex.quote(remote_path)}", ssh_options, timeout=30)
 
 
 def run_windows_powershell(
@@ -422,6 +571,78 @@ def remote_path_for_repo_file(config: ServerConfig, temp_dir: str, file_path: st
     if config.platform == "windows":
         return windows_path_join(temp_dir, file_path)
     return posixpath.join(temp_dir, file_path)
+
+
+def remote_destination_path(root: str, repo_id: str, file_path: str | None = None) -> str:
+    parts = repo_id.split("/", 1)
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise ValueError("repo_id must use the Hugging Face <org>/<model> form")
+    path = posixpath.join(root.rstrip("/") or "/", parts[0], parts[1])
+    if file_path:
+        path = posixpath.join(path, file_path)
+    return path
+
+
+def mkdir_remote_parent(ssh_target: str, remote_path: str, ssh_options: list[str]) -> None:
+    parent = posixpath.dirname(remote_path)
+    run_ssh(ssh_target, f"mkdir -p {shlex.quote(parent)}", ssh_options, timeout=30)
+
+
+def ensure_remote_directory(ssh_target: str, remote_path: str, ssh_options: list[str]) -> None:
+    run_ssh(ssh_target, f"mkdir -p {shlex.quote(remote_path)}", ssh_options, timeout=30)
+
+
+def remote_file_size(ssh_target: str, remote_path: str, ssh_options: list[str]) -> int | None:
+    command = (
+        f"if test -f {shlex.quote(remote_path)}; then "
+        f"stat -c %s {shlex.quote(remote_path)}; fi"
+    )
+    result = run_ssh(ssh_target, command, ssh_options, timeout=30)
+    output = result.stdout.strip()
+    if not output:
+        return None
+    return int(output)
+
+
+def remote_free_bytes(ssh_target: str, remote_path: str, ssh_options: list[str]) -> int:
+    ensure_remote_directory(ssh_target, remote_path, ssh_options)
+    result = run_ssh(
+        ssh_target,
+        f"df -Pk {shlex.quote(remote_path)} | tail -n 1",
+        ssh_options,
+        timeout=30,
+    )
+    parts = result.stdout.strip().split()
+    if len(parts) < 4:
+        raise RuntimeError(f"could not parse df output for {ssh_target}:{remote_path}")
+    return int(parts[3]) * 1024
+
+
+def require_ssh_target(config: ServerConfig) -> str:
+    if not config.ssh_target:
+        raise RuntimeError(f"server {config.name} is missing ssh_target")
+    return config.ssh_target
+
+
+def run_local_python_script(
+    encoded_script: str,
+    env: dict[str, str],
+    timeout: int | None = None,
+) -> CommandResult:
+    code = f"import base64; exec(base64.b64decode({encoded_script!r}).decode())"
+    merged_env = os.environ.copy()
+    merged_env.update(env)
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        text=True,
+        capture_output=True,
+        env=merged_env,
+        timeout=timeout,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or proc.stdout.strip())
+    return CommandResult(stdout=proc.stdout, stderr=proc.stderr)
 
 
 def windows_path_join(root: str, *parts: str) -> str:

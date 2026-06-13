@@ -2,7 +2,12 @@ from pathlib import Path
 
 import pytest
 
-from msdl.cli import build_parser, download, split_windows_ssh_option
+from msdl.cli import (
+    build_parser,
+    download,
+    parse_remote_destination,
+    split_windows_ssh_option,
+)
 from msdl.hf import SAVE_PATH_ENV
 
 
@@ -26,6 +31,29 @@ def test_download_transfer_backend_defaults_to_auto():
     args = build_parser().parse_args(["download", "org/model", "--servers", "servers.toml"])
 
     assert args.transfer_backend == "auto"
+
+
+def test_download_parses_remote_destination_and_work_path():
+    args = build_parser().parse_args(
+        [
+            "download",
+            "org/model",
+            "--servers",
+            "servers.toml",
+            "--destination",
+            "final:/models",
+            "--work-path",
+            "/tmp/msdl-work",
+        ]
+    )
+
+    assert args.destination == "final:/models"
+    assert args.work_path == Path("/tmp/msdl-work")
+
+
+def test_parse_remote_destination_requires_absolute_path():
+    with pytest.raises(ValueError, match="--destination"):
+        parse_remote_destination("final:models")
 
 
 def test_windows_ssh_option_split_preserves_backslash_path():

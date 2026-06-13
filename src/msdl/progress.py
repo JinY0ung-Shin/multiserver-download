@@ -31,7 +31,7 @@ class ProgressTracker:
         path: Path,
         repo_id: str,
         revision: str,
-        target_dir: Path,
+        target_dir: Path | str,
         assignments: list[Assignment],
     ) -> "ProgressTracker":
         files: dict[str, dict[str, Any]] = {}

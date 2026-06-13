@@ -1,4 +1,10 @@
 [[servers]]
+name = "main"
+local = true
+platform = "linux"
+temp_roots = ["/data/msdl-tmp", "/tmp"]
+
+[[servers]]
 name = "win1"
 platform = "windows"
 ssh_target = "user@win1"

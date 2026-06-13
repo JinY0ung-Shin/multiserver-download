@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tomllib
 from pathlib import Path
 
@@ -18,14 +19,17 @@ def load_servers(path: Path) -> list[ServerConfig]:
         if not isinstance(item, dict):
             raise ValueError(f"server entry #{index} must be a table")
         name = str(item.get("name") or "").strip()
-        ssh_target = str(item.get("ssh_target") or "").strip()
-        platform = normalize_platform(item.get("platform", "linux"))
+        local = parse_bool(item.get("local", False))
+        raw_platform = item.get("platform")
+        default_platform = "windows" if local and os.name == "nt" else "linux"
+        platform = normalize_platform(raw_platform or default_platform)
+        ssh_target = str(item.get("ssh_target") or "").strip() or None
         roots = item.get("temp_roots", ["/tmp"])
         if not name:
             raise ValueError(f"server entry #{index} is missing name")
         if name in names:
             raise ValueError(f"duplicate server name: {name}")
-        if not ssh_target:
+        if not local and not ssh_target:
             raise ValueError(f"server {name} is missing ssh_target")
         if not isinstance(roots, list) or not roots:
             raise ValueError(f"server {name} must have non-empty temp_roots")
@@ -36,10 +40,23 @@ def load_servers(path: Path) -> list[ServerConfig]:
                 ssh_target=ssh_target,
                 temp_roots=temp_roots,
                 platform=platform,
+                local=local,
             )
         )
         names.add(name)
     return servers
+
+
+def parse_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    raise ValueError(f"invalid boolean value: {value}")
 
 
 def normalize_platform(value: object) -> WorkerPlatform:

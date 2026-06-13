@@ -40,6 +40,25 @@ def test_load_servers_supports_windows_platform(tmp_path):
     assert server.temp_roots == ("D:/msdl-tmp",)
 
 
+def test_load_servers_supports_local_main_without_ssh_target(tmp_path):
+    path = tmp_path / "servers.toml"
+    path.write_text(
+        """
+        [[servers]]
+        name = "main"
+        local = true
+        temp_roots = ["/data/msdl-tmp"]
+        """,
+        encoding="utf-8",
+    )
+
+    server = load_servers(path)[0]
+
+    assert server.local is True
+    assert server.ssh_target is None
+    assert server.platform == "linux"
+
+
 def test_load_servers_rejects_unknown_platform(tmp_path):
     path = tmp_path / "servers.toml"
     path.write_text(

@@ -17,9 +17,10 @@ class RepoFile:
 @dataclass(frozen=True)
 class ServerConfig:
     name: str
-    ssh_target: str
+    ssh_target: str | None
     temp_roots: tuple[str, ...]
     platform: WorkerPlatform = "linux"
+    local: bool = False
 
 
 @dataclass(frozen=True)
