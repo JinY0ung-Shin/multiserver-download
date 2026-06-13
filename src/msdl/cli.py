@@ -20,7 +20,9 @@ from pathlib import PurePosixPath
 
 from .config import load_servers
 from .hf import (
+    INSECURE_SKIP_TLS_VERIFY_ENV,
     SAVE_PATH_ENV,
+    env_flag,
     get_hf_token,
     list_repo_files,
     local_path_for_repo_file,
@@ -115,6 +117,11 @@ def build_parser() -> argparse.ArgumentParser:
     download_parser.add_argument("--skip-speed-test", action="store_true", help="use equal server weights")
     download_parser.add_argument("--reserve-gib", type=float, default=5.0, help="free-space reserve per temp root")
     download_parser.add_argument("--forward-hf-token", action="store_true", help="forward local HF token to workers")
+    download_parser.add_argument(
+        "--insecure-skip-tls-verify",
+        action="store_true",
+        help="disable TLS certificate verification for Hugging Face requests",
+    )
     download_parser.add_argument("--ssh-option", action="append", default=[], help="extra ssh option, repeatable")
     download_parser.add_argument(
         "--transfer-backend",
@@ -160,14 +167,24 @@ def download(args: argparse.Namespace) -> None:
     plan_dir = target_dir / ".msdl" / job_id
     token = get_hf_token()
     forwarded_token = token if args.forward_hf_token else None
+    insecure_skip_tls_verify = args.insecure_skip_tls_verify or env_flag(INSECURE_SKIP_TLS_VERIFY_ENV)
 
     LOG.info("repo: %s", args.repo_id)
     LOG.info("revision: %s", args.revision)
     LOG.info("local work target: %s", target_dir)
     LOG.info("final target: %s", destination.label)
+    if insecure_skip_tls_verify:
+        LOG.warning("TLS certificate verification is disabled for Hugging Face requests")
 
     servers = load_servers(args.servers)
-    files = list_repo_files(args.repo_id, args.revision, args.include, args.exclude, token)
+    files = list_repo_files(
+        args.repo_id,
+        args.revision,
+        args.include,
+        args.exclude,
+        token,
+        insecure_skip_tls_verify=insecure_skip_tls_verify,
+    )
     if not files:
         raise ValueError("manifest matched no files")
     total_bytes = sum(file.size for file in files)
@@ -187,6 +204,7 @@ def download(args: argparse.Namespace) -> None:
         skip_speed_test=args.skip_speed_test,
         ssh_options=ssh_options,
         forwarded_token=forwarded_token,
+        insecure_skip_tls_verify=insecure_skip_tls_verify,
     )
 
     reserve_bytes = int(args.reserve_gib * 1024**3)
@@ -226,6 +244,7 @@ def download(args: argparse.Namespace) -> None:
         destination=destination,
         ssh_options=ssh_options,
         forwarded_token=forwarded_token,
+        insecure_skip_tls_verify=insecure_skip_tls_verify,
         keep_remote=args.keep_remote,
         tracker=tracker,
         transfer_backend=transfer_backend,
@@ -451,6 +470,7 @@ def probe_servers(
     skip_speed_test: bool,
     ssh_options: list[str],
     forwarded_token: str | None,
+    insecure_skip_tls_verify: bool,
 ) -> list[ServerProbe]:
     sample = max(files, key=lambda item: item.size)
     bytes_to_read = max(1, speed_test_mib) * 1024 * 1024
@@ -468,6 +488,7 @@ def probe_servers(
                 bytes_to_read=bytes_to_read,
                 ssh_options=ssh_options,
                 forwarded_token=forwarded_token,
+                insecure_skip_tls_verify=insecure_skip_tls_verify,
             )
         LOG.info(
             "probe %s: temp=%s free=%s speed=%s/s",
@@ -616,6 +637,7 @@ def run_assignments(
     destination: Destination,
     ssh_options: list[str],
     forwarded_token: str | None,
+    insecure_skip_tls_verify: bool,
     keep_remote: bool,
     tracker: ProgressTracker,
     transfer_backend: str,
@@ -668,6 +690,7 @@ def run_assignments(
                     temp_dir=probe.temp_dir,
                     ssh_options=ssh_options,
                     forwarded_token=forwarded_token,
+                    insecure_skip_tls_verify=insecure_skip_tls_verify,
                 )
                 summary = tracker.update_file(file.path, "transferring")
                 backend = resolve_transfer_backend_for_server(transfer_backend, probe.config)

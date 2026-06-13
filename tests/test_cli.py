@@ -40,6 +40,20 @@ def test_download_transfer_backend_defaults_to_auto():
     assert args.transfer_backend == "auto"
 
 
+def test_download_parses_insecure_skip_tls_verify():
+    args = build_parser().parse_args(
+        [
+            "download",
+            "org/model",
+            "--servers",
+            "servers.toml",
+            "--insecure-skip-tls-verify",
+        ]
+    )
+
+    assert args.insecure_skip_tls_verify is True
+
+
 def test_download_parses_remote_destination_and_work_path():
     args = build_parser().parse_args(
         [

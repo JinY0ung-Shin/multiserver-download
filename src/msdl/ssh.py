@@ -25,6 +25,55 @@ class CommandResult:
     stderr: str
 
 
+_PYTHON_HF_DOWNLOAD_SCRIPT = r"""
+import os
+import shutil
+from pathlib import Path, PurePosixPath
+
+if os.environ.get("MSDL_INSECURE_SKIP_TLS_VERIFY") == "1":
+    import httpx
+    from huggingface_hub.utils import set_client_factory
+    from huggingface_hub.utils._http import hf_request_event_hook
+
+    set_client_factory(
+        lambda: httpx.Client(
+            event_hooks={"request": [hf_request_event_hook]},
+            follow_redirects=True,
+            timeout=None,
+            verify=False,
+        )
+    )
+
+from huggingface_hub import hf_hub_download
+
+repo_id = os.environ["MSDL_REPO_ID"]
+revision = os.environ["MSDL_REVISION"]
+file_path = os.environ["MSDL_FILE_PATH"]
+local_dir = os.environ["MSDL_LOCAL_DIR"]
+token = (
+    os.environ.get("MSDL_HF_TOKEN")
+    or os.environ.get("HF_TOKEN")
+    or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+)
+
+downloaded = Path(
+    hf_hub_download(
+        repo_id=repo_id,
+        filename=file_path,
+        revision=revision,
+        local_dir=local_dir,
+        token=token,
+    )
+)
+expected = Path(local_dir).joinpath(*PurePosixPath(file_path).parts)
+if downloaded != expected and downloaded.is_file() and not expected.is_file():
+    expected.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(downloaded, expected)
+if not expected.is_file():
+    raise RuntimeError(f"download did not produce expected file: {expected}")
+"""
+
+
 def run_ssh(
     target: str,
     remote_command: str,
@@ -138,6 +187,7 @@ def probe_speed(
     bytes_to_read: int,
     ssh_options: list[str],
     forwarded_token: str | None,
+    insecure_skip_tls_verify: bool,
 ) -> float:
     url = (
         f"https://huggingface.co/{quote(repo_id, safe='/')}"
@@ -146,6 +196,7 @@ def probe_speed(
     script = r"""
 import json
 import os
+import ssl
 import sys
 import time
 import urllib.request
@@ -162,10 +213,13 @@ request = urllib.request.Request(url)
 request.add_header("Range", f"bytes=0-{limit - 1}")
 if token:
     request.add_header("Authorization", f"Bearer {token}")
+context = None
+if os.environ.get("MSDL_INSECURE_SKIP_TLS_VERIFY") == "1":
+    context = ssl._create_unverified_context()
 
 start = time.monotonic()
 read = 0
-with urllib.request.urlopen(request, timeout=45) as response:
+with urllib.request.urlopen(request, timeout=45, context=context) as response:
     while read < limit:
         chunk = response.read(min(1024 * 1024, limit - read))
         if not chunk:
@@ -181,6 +235,8 @@ print(json.dumps({"bytes": read, "seconds": elapsed, "bps": read / elapsed}))
     }
     if forwarded_token:
         env["MSDL_HF_TOKEN"] = forwarded_token
+    if insecure_skip_tls_verify:
+        env["MSDL_INSECURE_SKIP_TLS_VERIFY"] = "1"
     if config.local:
         result = run_local_python_script(encoded, env, timeout=90)
     else:
@@ -201,6 +257,7 @@ def download_remote_file(
     temp_dir: str,
     ssh_options: list[str],
     forwarded_token: str | None,
+    insecure_skip_tls_verify: bool,
 ) -> str:
     if config.local:
         return download_local_file(
@@ -209,9 +266,18 @@ def download_remote_file(
             file=file,
             temp_dir=temp_dir,
             forwarded_token=forwarded_token,
+            insecure_skip_tls_verify=insecure_skip_tls_verify,
         )
     remote_path = remote_path_for_repo_file(config, temp_dir, file.path)
-    command = _download_command(config, repo_id, revision, file.path, temp_dir, forwarded_token)
+    command = _download_command(
+        config,
+        repo_id,
+        revision,
+        file.path,
+        temp_dir,
+        forwarded_token,
+        insecure_skip_tls_verify,
+    )
     run_ssh(require_ssh_target(config), command, ssh_options, timeout=None)
     return remote_path
 
@@ -222,7 +288,18 @@ def download_local_file(
     file: RepoFile,
     temp_dir: str,
     forwarded_token: str | None,
+    insecure_skip_tls_verify: bool,
 ) -> str:
+    if insecure_skip_tls_verify:
+        return download_local_file_python(
+            repo_id=repo_id,
+            revision=revision,
+            file=file,
+            temp_dir=temp_dir,
+            forwarded_token=forwarded_token,
+            insecure_skip_tls_verify=insecure_skip_tls_verify,
+        )
+
     temp_path = Path(temp_dir).expanduser()
     temp_path.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
@@ -248,6 +325,25 @@ def download_local_file(
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip() or proc.stdout.strip())
 
+    local_path = temp_path.joinpath(*PurePosixPath(file.path).parts)
+    if not local_path.is_file():
+        raise RuntimeError(f"download did not produce expected file: {local_path}")
+    return str(local_path)
+
+
+def download_local_file_python(
+    repo_id: str,
+    revision: str,
+    file: RepoFile,
+    temp_dir: str,
+    forwarded_token: str | None,
+    insecure_skip_tls_verify: bool,
+) -> str:
+    temp_path = Path(temp_dir).expanduser()
+    temp_path.mkdir(parents=True, exist_ok=True)
+    encoded = base64.b64encode(_PYTHON_HF_DOWNLOAD_SCRIPT.encode("utf-8")).decode("ascii")
+    env = download_python_env(repo_id, revision, file.path, str(temp_path), forwarded_token, insecure_skip_tls_verify)
+    run_local_python_script(encoded, env, timeout=None)
     local_path = temp_path.joinpath(*PurePosixPath(file.path).parts)
     if not local_path.is_file():
         raise RuntimeError(f"download did not produce expected file: {local_path}")
@@ -324,10 +420,64 @@ def _download_command(
     file_path: str,
     temp_dir: str,
     forwarded_token: str | None,
+    insecure_skip_tls_verify: bool,
 ) -> str:
+    if insecure_skip_tls_verify:
+        return _download_python_command(
+            config,
+            repo_id,
+            revision,
+            file_path,
+            temp_dir,
+            forwarded_token,
+            insecure_skip_tls_verify,
+        )
     if config.platform == "windows":
         return _download_windows_command(repo_id, revision, file_path, temp_dir, forwarded_token)
     return _download_linux_command(repo_id, revision, file_path, temp_dir, forwarded_token)
+
+
+def _download_python_command(
+    config: ServerConfig,
+    repo_id: str,
+    revision: str,
+    file_path: str,
+    temp_dir: str,
+    forwarded_token: str | None,
+    insecure_skip_tls_verify: bool,
+) -> str:
+    encoded = base64.b64encode(_PYTHON_HF_DOWNLOAD_SCRIPT.encode("utf-8")).decode("ascii")
+    env = download_python_env(
+        repo_id,
+        revision,
+        file_path,
+        temp_dir,
+        forwarded_token,
+        insecure_skip_tls_verify,
+    )
+    return python_script_command(config, encoded, env)
+
+
+def download_python_env(
+    repo_id: str,
+    revision: str,
+    file_path: str,
+    temp_dir: str,
+    forwarded_token: str | None,
+    insecure_skip_tls_verify: bool,
+) -> dict[str, str]:
+    env = {
+        "MSDL_REPO_ID": repo_id,
+        "MSDL_REVISION": revision,
+        "MSDL_FILE_PATH": file_path,
+        "MSDL_LOCAL_DIR": temp_dir,
+    }
+    if forwarded_token:
+        env["MSDL_HF_TOKEN"] = forwarded_token
+    if insecure_skip_tls_verify:
+        env["MSDL_INSECURE_SKIP_TLS_VERIFY"] = "1"
+        env["HF_HUB_DISABLE_XET"] = "1"
+    return env
 
 
 def _download_linux_command(

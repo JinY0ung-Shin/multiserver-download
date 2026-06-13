@@ -102,6 +102,12 @@ Public repos usually do not require `hf auth login`. Private or gated repos do.
 For faster per-server download, install `hf_transfer` on worker servers. `msdl`
 enables `HF_HUB_ENABLE_HF_TRANSFER=1` only when the package is present.
 
+If a trusted corporate proxy breaks TLS verification and you cannot install the
+proxy CA certificate yet, pass `--insecure-skip-tls-verify`. This disables TLS
+certificate verification for Hugging Face manifest, probe, and download
+requests and disables Xet transfer so the download body uses the same TLS
+setting. Use it only as a temporary workaround.
+
 ## Configure Servers
 
 Copy `servers.example.toml` and edit it:
@@ -208,6 +214,24 @@ uv run msdl download org/private-model `
 
 The token is forwarded only to the remote command environment and is not printed
 in logs.
+
+## TLS Verification
+
+Keep TLS verification enabled by default. To temporarily ignore certificate
+verification errors for Hugging Face requests:
+
+```powershell
+uv run msdl download org/model `
+  --servers .\servers.toml `
+  --destination user@final:/models `
+  --insecure-skip-tls-verify
+```
+
+The same behavior can be enabled with:
+
+```powershell
+$env:MULTISERVER_DOWNLOAD_INSECURE_SKIP_TLS_VERIFY = "1"
+```
 
 ## Transfer Behavior
 

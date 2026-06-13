@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from msdl.hf import (
+    configure_hf_http_client,
     list_repo_files,
     local_path_for_repo_file,
     target_dir_for,
@@ -75,3 +76,21 @@ def test_list_repo_files_rejects_missing_size_metadata(monkeypatch):
 
     with pytest.raises(RuntimeError, match="missing size metadata"):
         list_repo_files("org/model", "main", [], [], None)
+
+
+def test_configure_hf_http_client_disables_verification(monkeypatch):
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    import huggingface_hub.utils as hf_utils
+
+    monkeypatch.setattr(hf_utils, "set_client_factory", lambda factory: factory())
+    monkeypatch.setitem(sys.modules, "httpx", types.SimpleNamespace(Client=FakeClient))
+
+    configure_hf_http_client(True)
+
+    assert captured["verify"] is False
+    assert captured["follow_redirects"] is True

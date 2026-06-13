@@ -3,7 +3,7 @@ import shutil
 import pytest
 
 from msdl import ssh
-from msdl.models import ServerConfig
+from msdl.models import RepoFile, ServerConfig
 
 
 def test_auto_transfer_backend_prefers_scp_on_windows(monkeypatch):
@@ -146,3 +146,45 @@ def test_write_worker_probe_file_local(tmp_path):
 def test_windows_path_parent_keeps_drive_root():
     assert ssh.windows_path_parent("D:/probe.txt") == "D:/"
     assert ssh.windows_path_parent("D:/tmp/probe.txt") == "D:/tmp"
+
+
+def test_download_python_env_sets_insecure_flag():
+    env = ssh.download_python_env(
+        "org/model",
+        "main",
+        "weights/model.bin",
+        "/tmp/msdl",
+        "hf_token",
+        True,
+    )
+
+    assert env["MSDL_REPO_ID"] == "org/model"
+    assert env["MSDL_HF_TOKEN"] == "hf_token"
+    assert env["MSDL_INSECURE_SKIP_TLS_VERIFY"] == "1"
+    assert env["HF_HUB_DISABLE_XET"] == "1"
+
+
+def test_download_local_file_insecure_uses_python_script(tmp_path, monkeypatch):
+    server_file = RepoFile("weights/model.bin", 5)
+    calls = []
+
+    def fake_run_local_python_script(encoded_script, env, timeout=None):
+        calls.append((encoded_script, env, timeout))
+        output = tmp_path / "weights" / "model.bin"
+        output.parent.mkdir(parents=True)
+        output.write_bytes(b"model")
+        return ssh.CommandResult(stdout="", stderr="")
+
+    monkeypatch.setattr(ssh, "run_local_python_script", fake_run_local_python_script)
+
+    path = ssh.download_local_file(
+        repo_id="org/model",
+        revision="main",
+        file=server_file,
+        temp_dir=str(tmp_path),
+        forwarded_token=None,
+        insecure_skip_tls_verify=True,
+    )
+
+    assert path == str(tmp_path / "weights" / "model.bin")
+    assert calls[0][1]["MSDL_INSECURE_SKIP_TLS_VERIFY"] == "1"

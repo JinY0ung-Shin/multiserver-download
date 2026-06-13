@@ -9,6 +9,7 @@ from .models import RepoFile
 
 
 SAVE_PATH_ENV = "MULTISERVER_DOWNLOAD_SAVE_PATH"
+INSECURE_SKIP_TLS_VERIFY_ENV = "MULTISERVER_DOWNLOAD_INSECURE_SKIP_TLS_VERIFY"
 _WINDOWS_RESERVED_NAMES = {
     "CON",
     "PRN",
@@ -22,6 +23,10 @@ _WINDOWS_INVALID_CHARS = set('<>:"|?*')
 
 def get_hf_token() -> str | None:
     return os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+
+
+def env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def target_dir_for(repo_id: str, save_root: Path) -> Path:
@@ -86,12 +91,14 @@ def list_repo_files(
     includes: list[str],
     excludes: list[str],
     token: str | None,
+    insecure_skip_tls_verify: bool = False,
 ) -> list[RepoFile]:
     try:
         from huggingface_hub import HfApi
     except ImportError as exc:
         raise RuntimeError("huggingface_hub is required; run `pip install -e .`") from exc
 
+    configure_hf_http_client(insecure_skip_tls_verify)
     api = HfApi(token=token)
     info = api.repo_info(repo_id=repo_id, revision=revision, files_metadata=True)
 
@@ -114,3 +121,23 @@ def list_repo_files(
     if not files:
         raise ValueError("no files matched the requested include/exclude filters")
     return sorted(files, key=lambda item: item.path)
+
+
+def configure_hf_http_client(insecure_skip_tls_verify: bool) -> None:
+    if not insecure_skip_tls_verify:
+        return
+    try:
+        import httpx
+        from huggingface_hub.utils import set_client_factory
+        from huggingface_hub.utils._http import hf_request_event_hook
+    except ImportError as exc:
+        raise RuntimeError("huggingface_hub and httpx are required for insecure TLS mode") from exc
+
+    set_client_factory(
+        lambda: httpx.Client(
+            event_hooks={"request": [hf_request_event_hook]},
+            follow_redirects=True,
+            timeout=None,
+            verify=False,
+        )
+    )
