@@ -73,14 +73,34 @@ Each Windows worker needs:
 The Windows main controller needs `ssh` and `scp`. In `auto` mode on Windows,
 worker pulls and final-destination pushes use `scp`.
 
-For faster per-server download, install `hf_transfer` on worker servers. `msdl`
-enables `HF_HUB_ENABLE_HF_TRANSFER=1` only when the package is present.
+Install the Hugging Face CLI on every machine that downloads from Hugging Face:
+the local main worker/controller and each remote worker. The final Linux
+destination does not need it unless it is also configured as a worker.
 
-One simple worker setup path is:
+Windows PowerShell:
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://hf.co/cli/install.ps1 | iex"
+hf --help
+```
+
+Linux:
+
+```bash
+curl -LsSf https://hf.co/cli/install.sh | bash
+hf --help
+```
+
+If you prefer Python-managed tools, this also works:
 
 ```bash
 uv tool install "huggingface_hub[hf_transfer]"
+hf --help
 ```
+
+Public repos usually do not require `hf auth login`. Private or gated repos do.
+For faster per-server download, install `hf_transfer` on worker servers. `msdl`
+enables `HF_HUB_ENABLE_HF_TRANSFER=1` only when the package is present.
 
 ## Configure Servers
 
@@ -170,6 +190,9 @@ It also writes the plan to the local target/work directory:
 ```
 
 ## Private Models
+
+Public Hugging Face repos can usually be downloaded without a token. Private
+repos and gated public repos require authentication.
 
 By default workers use their own Hugging Face credentials. If the controller has
 the token and workers do not, pass:

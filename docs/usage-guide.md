@@ -70,6 +70,10 @@ uv run msdl download meta-llama/Llama-3.1-70B --servers .\servers.toml
 public 모델이면 토큰 없이도 동작할 수 있습니다. private/gated 모델이면 토큰이
 필요합니다.
 
+토큰과 HF CLI 설치는 별개입니다. public 모델이라도 다운로드에 참여하는 서버에는
+`hf` 또는 `huggingface-cli` 명령이 설치되어 있어야 합니다. 반대로 public 모델만
+받는다면 `hf auth login`은 보통 필요 없습니다.
+
 Windows main controller에서 토큰을 설정합니다.
 
 ```powershell
@@ -218,15 +222,60 @@ Linux worker에는 아래가 필요합니다.
 - `hf` 또는 `huggingface-cli`
 - 임시 다운로드를 저장할 충분한 디스크 공간
 
-권장 설치:
+final Linux destination은 최종 저장소일 뿐 worker가 아니면 HF CLI가 필요 없습니다.
+
+### 5.1 Hugging Face CLI 설치
+
+다운로드에 참여하는 모든 서버에 설치합니다.
+
+- Windows main controller가 `local = true` worker이면 Windows main에도 설치
+- Linux worker 2대에도 설치
+- Windows worker를 추가로 쓰면 해당 Windows worker에도 설치
+- final Linux destination은 worker가 아니면 설치 불필요
+
+Windows main 또는 Windows worker:
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://hf.co/cli/install.ps1 | iex"
+hf --help
+```
+
+Linux worker:
+
+```bash
+curl -LsSf https://hf.co/cli/install.sh | bash
+hf --help
+```
+
+Python/uv로 관리하고 싶으면 아래 방식도 사용할 수 있습니다.
 
 ```bash
 uv tool install "huggingface_hub[hf_transfer]"
+hf --help
 ```
 
 `hf_transfer`가 있으면 worker 원격 다운로드 명령에서 자동으로
 `HF_HUB_ENABLE_HF_TRANSFER=1`을 켭니다. 설치되어 있지 않아도 동작은 하지만
 서버당 다운로드 속도가 낮을 수 있습니다.
+
+public 모델만 받을 때는 설치 후 로그인 없이 사용할 수 있습니다.
+
+```bash
+hf download bert-base-uncased config.json --local-dir /tmp/hf-test
+```
+
+Windows에서는:
+
+```powershell
+hf download bert-base-uncased config.json --local-dir D:\hf-test
+```
+
+private/gated 모델이면 각 worker에서 직접 로그인하거나, Windows main
+controller의 토큰을 `--forward-hf-token`으로 전달합니다.
+
+```bash
+hf auth login
+```
 
 SSH로 들어갔을 때 `hf`가 보이는지 확인합니다.
 
@@ -246,10 +295,11 @@ Windows worker에는 아래가 필요합니다.
 - `hf` 또는 `huggingface-cli`
 - 임시 다운로드를 저장할 충분한 디스크 공간
 
-Windows worker에서 권장 설치:
+Windows worker에서 uv로 설치하는 경우:
 
 ```powershell
 uv tool install "huggingface_hub[hf_transfer]"
+hf --help
 ```
 
 Windows main controller에서 Windows worker를 확인하는 예:
@@ -616,6 +666,12 @@ ssh user@win1 'powershell -NoProfile -Command "Get-Command hf; Get-Command huggi
 
 ```bash
 ssh user@ext1 'uv tool install "huggingface_hub[hf_transfer]"'
+```
+
+또는 공식 installer를 사용할 수 있습니다.
+
+```bash
+ssh user@ext1 'curl -LsSf https://hf.co/cli/install.sh | bash'
 ```
 
 `no usable temp root found`
