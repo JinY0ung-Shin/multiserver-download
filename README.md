@@ -27,6 +27,7 @@ The controller is responsible for planning and verification only:
 controller
   ├─ reads HF manifest
   ├─ probes each server for free space and HF speed
+  ├─ verifies worker HF CLI tools and transfer paths
   ├─ assigns bytes according to measured speed
   ├─ runs remote downloads over SSH
   ├─ pulls completed files with rsync or scp when needed
@@ -159,6 +160,7 @@ At startup, `msdl` logs:
 - selected temp directory per server
 - measured speed per server
 - free space per server
+- preflight result for worker tools, worker pull paths, and final push path
 - assigned bytes and file counts
 
 It also writes the plan to the local target/work directory:
@@ -195,6 +197,11 @@ worker temp file -> controller .incoming file when needed -> size check -> final
 
 On a Windows main controller, `auto` uses `scp` for worker pulls and final
 destination pushes. Interrupted `scp` transfers restart for that file.
+
+Use `--dry-run` before a real run. It still checks SSH reachability, temp
+directories, worker HF CLI tools, worker-to-controller transfer, final
+destination write/rename, manifest, capacity, speed probes, and the assignment
+plan, but it does not download model files.
 
 ## Development
 

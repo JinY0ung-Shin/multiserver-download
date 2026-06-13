@@ -253,6 +253,69 @@ def download_local_file(
     return str(local_path)
 
 
+def check_worker_tools(config: ServerConfig, ssh_options: list[str]) -> None:
+    if config.local:
+        if shutil.which("hf") or shutil.which("huggingface-cli"):
+            return
+        raise RuntimeError(f"missing hf or huggingface-cli on worker {config.name}")
+
+    if config.platform == "windows":
+        script = textwrap.dedent(
+            """
+            $ErrorActionPreference = 'Stop'
+            if (-not (Get-Command hf -ErrorAction SilentlyContinue) -and
+                -not (Get-Command huggingface-cli -ErrorAction SilentlyContinue)) {
+              throw 'missing hf or huggingface-cli on worker'
+            }
+            """
+        )
+        run_windows_powershell(require_ssh_target(config), script, ssh_options, timeout=30)
+        return
+
+    command = (
+        "command -v hf >/dev/null 2>&1 || "
+        "command -v huggingface-cli >/dev/null 2>&1 || "
+        "{ echo 'missing hf or huggingface-cli on worker' >&2; exit 127; }"
+    )
+    run_ssh(require_ssh_target(config), command, ssh_options, timeout=30)
+
+
+def write_worker_probe_file(
+    config: ServerConfig,
+    remote_path: str,
+    content: str,
+    ssh_options: list[str],
+) -> None:
+    if config.local:
+        path = Path(remote_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="ascii")
+        return
+
+    if config.platform == "windows":
+        parent = windows_path_parent(remote_path)
+        script = textwrap.dedent(
+            f"""
+            $ErrorActionPreference = 'Stop'
+            New-Item -ItemType Directory -Force -LiteralPath {ps_quote(parent)} | Out-Null
+            [System.IO.File]::WriteAllText(
+              {ps_quote(remote_path)},
+              {ps_quote(content)},
+              [System.Text.Encoding]::ASCII
+            )
+            """
+        )
+        run_windows_powershell(require_ssh_target(config), script, ssh_options, timeout=30)
+        return
+
+    parent = posixpath.dirname(remote_path)
+    command = (
+        f"mkdir -p {shlex.quote(parent)} && "
+        f"printf %s {shlex.quote(content)} > {shlex.quote(remote_path)}"
+    )
+    run_ssh(require_ssh_target(config), command, ssh_options, timeout=30)
+
+
 def _download_command(
     config: ServerConfig,
     repo_id: str,
@@ -515,6 +578,10 @@ def remove_remote_file(config: ServerConfig, remote_path: str, ssh_options: list
     run_ssh(require_ssh_target(config), f"rm -f {shlex.quote(remote_path)}", ssh_options, timeout=30)
 
 
+def remove_remote_path(ssh_target: str, remote_path: str, ssh_options: list[str]) -> None:
+    run_ssh(ssh_target, f"rm -f {shlex.quote(remote_path)}", ssh_options, timeout=30)
+
+
 def run_windows_powershell(
     target: str,
     script: str,
@@ -660,3 +727,13 @@ def windows_path_join(root: str, *parts: str) -> str:
             return normalized_root
         return base
     return "/".join([base, *normalized_parts])
+
+
+def windows_path_parent(path: str) -> str:
+    normalized = path.replace("\\", "/").rstrip("/")
+    if "/" not in normalized:
+        return normalized
+    parent = normalized.rsplit("/", 1)[0]
+    if len(parent) == 2 and parent[1] == ":":
+        return f"{parent}/"
+    return parent

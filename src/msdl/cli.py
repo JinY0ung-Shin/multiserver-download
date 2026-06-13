@@ -33,6 +33,7 @@ from .progress import (
     load_status,
 )
 from .ssh import (
+    check_worker_tools,
     download_remote_file,
     ensure_remote_directory,
     probe_df,
@@ -41,10 +42,13 @@ from .ssh import (
     remote_destination_path,
     remote_file_size,
     remote_free_bytes,
+    remote_path_for_repo_file,
+    remove_remote_path,
     pull_file_scp,
     pull_file_rsync,
     remove_remote_file,
     resolve_transfer_backend_for_server,
+    write_worker_probe_file,
 )
 
 
@@ -162,6 +166,8 @@ def download(args: argparse.Namespace) -> None:
 
     servers = load_servers(args.servers)
     files = list_repo_files(args.repo_id, args.revision, args.include, args.exclude, token)
+    if not files:
+        raise ValueError("manifest matched no files")
     total_bytes = sum(file.size for file in files)
     LOG.info("manifest: %s files, %s", len(files), format_bytes(total_bytes))
 
@@ -184,9 +190,16 @@ def download(args: argparse.Namespace) -> None:
     reserve_bytes = int(args.reserve_gib * 1024**3)
     assignments = assign_files(files, probes, reserve_bytes=reserve_bytes)
     log_plan(assignments)
-    write_plan(plan_dir / "plan.json", args, job_id, destination.label, total_bytes, assignments)
     transfer_backend = args.transfer_backend
     validate_transfer_backends(assignments, transfer_backend, destination)
+    preflight_checks(
+        assignments=assignments,
+        incoming_dir=incoming_dir,
+        destination=destination,
+        ssh_options=ssh_options,
+        transfer_backend=transfer_backend,
+    )
+    write_plan(plan_dir / "plan.json", args, job_id, destination.label, total_bytes, assignments)
     LOG.info("transfer backend: %s", transfer_backend)
     tracker = ProgressTracker.create(
         plan_dir / "status.json",
@@ -444,6 +457,72 @@ def validate_transfer_backends(
         resolve_transfer_backend_for_server(transfer_backend, assignment.probe.config)
     if destination.is_remote:
         resolve_transfer_backend_for_server(transfer_backend, None)
+
+
+def preflight_checks(
+    assignments: list[Assignment],
+    incoming_dir: Path,
+    destination: Destination,
+    ssh_options: list[str],
+    transfer_backend: str,
+) -> None:
+    incoming_dir.mkdir(parents=True, exist_ok=True)
+    token = uuid.uuid4().hex[:8]
+    content = f"msdl-preflight-{token}\n"
+    LOG.info("preflight: checking worker tools and transfer paths")
+
+    for assignment in assignments:
+        config = assignment.probe.config
+        check_worker_tools(config, ssh_options)
+        remote_probe_path = remote_path_for_repo_file(
+            config,
+            assignment.probe.temp_dir,
+            f".msdl-preflight-{token}.txt",
+        )
+        local_probe_path = incoming_dir / f".msdl-preflight-{config.name}-{token}.txt"
+        backend = resolve_transfer_backend_for_server(transfer_backend, config)
+        try:
+            write_worker_probe_file(config, remote_probe_path, content, ssh_options)
+            if config.local:
+                actual = Path(remote_probe_path).read_text(encoding="ascii")
+            else:
+                if not config.ssh_target:
+                    raise RuntimeError(f"server {config.name} is missing ssh_target")
+                pull_file(backend, config.ssh_target, remote_probe_path, local_probe_path, ssh_options)
+                actual = local_probe_path.read_text(encoding="ascii")
+            if actual != content:
+                raise RuntimeError(f"preflight probe mismatch for worker {config.name}")
+        finally:
+            local_probe_path.unlink(missing_ok=True)
+            try:
+                remove_remote_file(config, remote_probe_path, ssh_options)
+            except Exception as exc:
+                LOG.debug("preflight cleanup failed for %s: %s", config.name, exc)
+
+    if destination.is_remote:
+        destination_backend = resolve_transfer_backend_for_server(transfer_backend, None)
+        local_probe_path = incoming_dir / f".msdl-preflight-destination-{token}.txt"
+        remote_probe_path = posixpath.join(
+            destination.remote_target_dir or "",
+            f".msdl-preflight-{token}.txt",
+        )
+        local_probe_path.write_text(content, encoding="ascii")
+        try:
+            push_file_to_remote(
+                local_probe_path,
+                destination.remote_ssh_target or "",
+                remote_probe_path,
+                ssh_options,
+                destination_backend,
+            )
+        finally:
+            local_probe_path.unlink(missing_ok=True)
+            try:
+                remove_remote_path(destination.remote_ssh_target or "", remote_probe_path, ssh_options)
+            except Exception as exc:
+                LOG.debug("preflight destination cleanup failed: %s", exc)
+
+    LOG.info("preflight: all checks passed")
 
 
 def write_plan(
