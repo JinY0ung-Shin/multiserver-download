@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
+
+
+WorkerPlatform = Literal["linux", "windows"]
 
 
 @dataclass(frozen=True)
@@ -15,6 +19,7 @@ class ServerConfig:
     name: str
     ssh_target: str
     temp_roots: tuple[str, ...]
+    platform: WorkerPlatform = "linux"
 
 
 @dataclass(frozen=True)

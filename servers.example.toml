@@ -1,14 +1,17 @@
 [[servers]]
-name = "ext1"
-ssh_target = "user@ext1"
+name = "win1"
+platform = "windows"
+ssh_target = "user@win1"
+temp_roots = ["D:/msdl-tmp"]
+
+[[servers]]
+name = "linux1"
+platform = "linux"
+ssh_target = "user@linux1"
 temp_roots = ["/data/tmp", "/tmp"]
 
 [[servers]]
-name = "ext2"
-ssh_target = "user@ext2"
-temp_roots = ["/data/tmp", "/tmp"]
-
-[[servers]]
-name = "ext3"
-ssh_target = "user@ext3"
+name = "linux2"
+platform = "linux"
+ssh_target = "user@linux2"
 temp_roots = ["/data/tmp", "/tmp"]

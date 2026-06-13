@@ -38,7 +38,7 @@ from .ssh import (
     pull_file_scp,
     pull_file_rsync,
     remove_remote_file,
-    resolve_transfer_backend,
+    resolve_transfer_backend_for_server,
 )
 
 
@@ -148,7 +148,7 @@ def download(args: argparse.Namespace) -> None:
     assignments = assign_files(files, probes, reserve_bytes=reserve_bytes)
     log_plan(assignments)
     write_plan(plan_dir / "plan.json", args, job_id, target_dir, total_bytes, assignments)
-    transfer_backend = resolve_transfer_backend(args.transfer_backend)
+    transfer_backend = args.transfer_backend
     LOG.info("transfer backend: %s", transfer_backend)
     tracker = ProgressTracker.create(
         plan_dir / "status.json",
@@ -384,9 +384,10 @@ def run_assignments(
                     forwarded_token=forwarded_token,
                 )
                 summary = tracker.update_file(file.path, "transferring")
-                LOG.info("%s pull %s; %s", probe.config.name, file.path, summary)
+                backend = resolve_transfer_backend_for_server(transfer_backend, probe.config)
+                LOG.info("%s pull %s via %s; %s", probe.config.name, file.path, backend, summary)
                 pull_file(
-                    transfer_backend,
+                    backend,
                     probe.config.ssh_target,
                     remote_path,
                     part_path,

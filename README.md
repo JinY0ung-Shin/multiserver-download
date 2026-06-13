@@ -2,7 +2,7 @@
 
 `msdl` is a single-controller CLI for downloading a Hugging Face model through
 multiple internet-facing SSH workers, then collecting the files into one final
-directory on the isolated/controller server.
+directory on the controller server. Workers can be Linux or Windows.
 
 For a complete Korean operating guide, see
 [docs/usage-guide.md](docs/usage-guide.md).
@@ -13,10 +13,10 @@ The data path does not go through an extra relay service:
                          Hugging Face
                     ┌─────────┬─────────┐
                     │         │         │
-                  ext1      ext2      ext3
+                  win1    linux1   linux2
                 download  download  download
                     │         │         │
-                    └──── controller pull ────▶ isolated/controller
+                    └──── controller pull ────▶ final Linux/controller
                                                 $MULTISERVER_DOWNLOAD_SAVE_PATH
 ```
 
@@ -25,7 +25,7 @@ The controller is responsible for planning and verification only:
 ```text
 controller
   ├─ reads HF manifest
-  ├─ probes each server with df and a small HF speed test
+  ├─ probes each server for free space and HF speed
   ├─ assigns bytes according to measured speed
   ├─ runs remote downloads over SSH
   ├─ pulls completed files with rsync or scp
@@ -38,17 +38,27 @@ controller
 uv sync
 ```
 
-Each worker server needs:
+The controller is the final destination. If the final files should land on a
+Linux server, run `msdl` on that Linux server and include the Windows machine as
+one worker in `servers.toml`.
+
+Each Linux worker needs:
 
 - SSH access from the controller
 - `python3`
 - `hf` or `huggingface-cli`
 - enough free space in one configured temporary root
 
-The controller needs `ssh` plus one transfer tool. On Linux/macOS, `auto`
-prefers `rsync` and falls back to `scp`. On Windows, `auto` prefers the built-in
-OpenSSH `scp` because native rsync path handling is inconsistent unless you
-install and configure a Windows rsync distribution explicitly.
+Each Windows worker needs:
+
+- SSH access from the controller, usually OpenSSH Server
+- PowerShell
+- `python` or `py -3`
+- `hf` or `huggingface-cli`
+- enough free space in one configured temporary root, such as `D:/msdl-tmp`
+
+The controller needs `ssh` plus one transfer tool. In `auto` mode, Linux workers
+use `rsync` when available and fall back to `scp`; Windows workers use `scp`.
 
 Workers only need `rsync` when the controller transfer backend is `rsync`.
 Workers do not need `rsync` when the controller uses `scp`.
@@ -68,13 +78,27 @@ Copy `servers.example.toml` and edit it:
 
 ```toml
 [[servers]]
-name = "ext1"
-ssh_target = "user@ext1"
+name = "win1"
+platform = "windows"
+ssh_target = "user@win1"
+temp_roots = ["D:/msdl-tmp"]
+
+[[servers]]
+name = "linux1"
+platform = "linux"
+ssh_target = "user@linux1"
+temp_roots = ["/data/tmp", "/tmp"]
+
+[[servers]]
+name = "linux2"
+platform = "linux"
+ssh_target = "user@linux2"
 temp_roots = ["/data/tmp", "/tmp"]
 ```
 
-`temp_roots` are checked with `df -Pk`. The controller picks a writable root
-with enough free space and creates:
+`platform` defaults to `linux` when omitted. Linux `temp_roots` are checked with
+`df -Pk`; Windows `temp_roots` are checked through PowerShell. The controller
+picks a writable root with enough free space and creates:
 
 ```text
 <temp_root>/msdl/<job_id>/<org>/<model>/
@@ -88,16 +112,6 @@ Set the final save root on the controller:
 export MULTISERVER_DOWNLOAD_SAVE_PATH=/models
 uv run msdl download meta-llama/Llama-3.1-70B --servers servers.toml
 ```
-
-Windows PowerShell controller example:
-
-```powershell
-$env:MULTISERVER_DOWNLOAD_SAVE_PATH = "D:\models"
-uv run msdl download meta-llama/Llama-3.1-70B --servers .\servers.toml
-```
-
-The worker `temp_roots` still use Linux paths, for example `/data/tmp` or
-`/tmp`, because workers are controlled over SSH.
 
 The final layout is:
 
@@ -154,9 +168,9 @@ With `rsync`, the default flags are optimized for large model files:
 ```
 
 This avoids the expensive initial scan pattern that makes rsync slow on huge
-cache directories. With `scp`, the transfer is simpler and works well on a
-Windows controller, but interrupted file transfers restart instead of using
-rsync's append verification.
+cache directories. Windows workers are pulled with `scp`; interrupted file
+transfers from Windows workers restart instead of using rsync's append
+verification.
 
 ## Development
 

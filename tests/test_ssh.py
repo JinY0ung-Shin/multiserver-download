@@ -1,6 +1,9 @@
 import shutil
 
+import pytest
+
 from msdl import ssh
+from msdl.models import ServerConfig
 
 
 def test_auto_transfer_backend_prefers_scp_on_windows(monkeypatch):
@@ -19,3 +22,45 @@ def test_auto_transfer_backend_prefers_rsync_on_posix(monkeypatch):
     )
 
     assert ssh.resolve_transfer_backend("auto") == "rsync"
+
+
+def test_auto_transfer_backend_uses_scp_for_windows_worker(monkeypatch):
+    server = ServerConfig(
+        name="win1",
+        ssh_target="user@win1",
+        temp_roots=("D:/msdl-tmp",),
+        platform="windows",
+    )
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda name: "/usr/bin/scp" if name == "scp" else None,
+    )
+
+    assert ssh.resolve_transfer_backend_for_server("auto", server) == "scp"
+
+
+def test_rsync_transfer_backend_rejects_windows_worker():
+    server = ServerConfig(
+        name="win1",
+        ssh_target="user@win1",
+        temp_roots=("D:/msdl-tmp",),
+        platform="windows",
+    )
+
+    with pytest.raises(RuntimeError, match="Windows worker"):
+        ssh.resolve_transfer_backend_for_server("rsync", server)
+
+
+def test_windows_remote_path_uses_forward_slashes():
+    server = ServerConfig(
+        name="win1",
+        ssh_target="user@win1",
+        temp_roots=("D:/msdl-tmp",),
+        platform="windows",
+    )
+
+    assert (
+        ssh.remote_path_for_repo_file(server, r"D:\msdl-tmp\job", "weights/model.bin")
+        == "D:/msdl-tmp/job/weights/model.bin"
+    )
